@@ -372,7 +372,7 @@ local function shortKey(k)
 end
 
 -- ====================================================================
--- REDE DE NODES (grafo com arestas fixas — nodes derivam, arestas sempre conectadas)
+-- REDE DE FUNDO (nodes com fade e linhas por proximidade) — atras dos cards
 -- ====================================================================
 local function createNetworkBG(parent)
 	local holder = new("Frame", {
@@ -384,62 +384,79 @@ local function createNetworkBG(parent)
 		Parent = parent,
 	})
 
-	local NODE_COUNT = 14   -- total de nodes
-	local NODE_R    = 3     -- raio visual (px)
-	local SPEED     = 0.022 -- fracao da area por segundo
+	local NODE_COUNT = 22
+	local NODE_R     = 2
+	local SPEED      = 0.03
+	local FADE_IN    = 0.9
+	local FADE_OUT   = 1.2
+	local LINK_DIST  = 0.28
 
-	-- nodes: posicao inicial espalhada, velocidade de drift aleatoria
 	local nodes = {}
 	for i = 1, NODE_COUNT do
 		local dot = new("Frame", {
 			BackgroundColor3 = T.Text,
-			BackgroundTransparency = 0.4,
+			BackgroundTransparency = 1,
 			BorderSizePixel = 0,
 			Size = UDim2.fromOffset(NODE_R * 2, NODE_R * 2),
+			AnchorPoint = Vector2.new(0.5, 0.5),
 			ZIndex = 2,
 			Parent = holder,
 		}, { pill() })
 		local ang = math.random() * math.pi * 2
 		nodes[i] = {
-			Dot = dot,
-			Pos = Vector2.new(0.05 + math.random() * 0.90, 0.05 + math.random() * 0.90),
-			Vel = Vector2.new(math.cos(ang), math.sin(ang)) * SPEED,
+			Dot  = dot,
+			Pos  = Vector2.new(0.05 + math.random() * 0.90, 0.05 + math.random() * 0.90),
+			Vel  = Vector2.new(math.cos(ang), math.sin(ang)) * SPEED,
+			Life = 4 + math.random() * 6,
+			Age  = math.random() * 2,
 		}
 	end
 
-	-- arestas fixas: cada entrada e um par {A, B} de indices de nodes
-	-- formam um grafo conectado distribuido pelos 14 nodes
-	local edges = {
-		{1,2},{1,4},{2,3},{2,5},{3,6},{4,5},{4,7},{5,6},
-		{5,8},{6,9},{7,8},{7,10},{8,9},{8,11},{9,12},
-		{10,11},{10,13},{11,12},{12,14},{13,14},{3,14},{1,13},
-	}
-
-	-- uma Frame por aresta, criada uma vez, reposicionada a cada Heartbeat
-	local edgeFrames = {}
-	for _, e in ipairs(edges) do
-		edgeFrames[#edgeFrames + 1] = {
-			Line = new("Frame", {
-				BackgroundColor3 = T.Dim,
-				BackgroundTransparency = 0.25,
-				BorderSizePixel = 0,
-				AnchorPoint = Vector2.new(0, 0.5),
-				Size = UDim2.fromOffset(0, 1),
-				ZIndex = 1,
-				Parent = holder,
-			}),
-			A = e[1],
-			B = e[2],
-		}
+	local lines = {}
+	local function getLine(idx)
+		local l = lines[idx]
+		if l then return l end
+		l = new("Frame", {
+			BackgroundColor3 = T.Text,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Size = UDim2.fromOffset(0, 1),
+			ZIndex = 1,
+			Parent = holder,
+		})
+		lines[idx] = l
+		return l
 	end
 
-	-- a cada Heartbeat: mover nodes, redesenhar arestas center-to-center
+	local function nodeFade(n)
+		if n.Age < FADE_IN then
+			return n.Age / FADE_IN
+		end
+		local rem = n.Life - n.Age
+		if rem < FADE_OUT then
+			return math.max(0, rem / FADE_OUT)
+		end
+		return 1
+	end
+
 	RunService.Heartbeat:Connect(function(dt)
-		if not holder.Parent then return end
+		if not holder.Parent or not holder.Visible then return end
 		local sz = holder.AbsoluteSize
 		if sz.X <= 0 or sz.Y <= 0 then return end
+		local diag = math.sqrt(sz.X * sz.X + sz.Y * sz.Y)
+		local maxDistPx = diag * LINK_DIST
 
 		for _, n in ipairs(nodes) do
+			n.Age = n.Age + dt
+			if n.Age >= n.Life then
+				local ang = math.random() * math.pi * 2
+				n.Pos  = Vector2.new(0.05 + math.random() * 0.90, 0.05 + math.random() * 0.90)
+				n.Vel  = Vector2.new(math.cos(ang), math.sin(ang)) * SPEED
+				n.Life = 4 + math.random() * 6
+				n.Age  = 0
+			end
+
 			local p = n.Pos + n.Vel * dt
 			if p.X < 0.02 or p.X > 0.98 then
 				n.Vel = Vector2.new(-n.Vel.X, n.Vel.Y)
@@ -450,22 +467,46 @@ local function createNetworkBG(parent)
 				p = Vector2.new(p.X, math.clamp(p.Y, 0.02, 0.98))
 			end
 			n.Pos = p
-			-- centralizar o dot exatamente no ponto do node
-			n.Dot.Position = UDim2.new(p.X, -NODE_R, p.Y, -NODE_R)
+
+			local fade = nodeFade(n)
+			n.Dot.BackgroundTransparency = 1 - fade * 0.7
+			n.Dot.Position = UDim2.new(p.X, 0, p.Y, 0)
 		end
 
-		for _, ef in ipairs(edgeFrames) do
-			local na = nodes[ef.A]
-			local nb = nodes[ef.B]
-			local ax = na.Pos.X * sz.X
-			local ay = na.Pos.Y * sz.Y
-			local bx = nb.Pos.X * sz.X
-			local by = nb.Pos.Y * sz.Y
-			local dist = math.sqrt((bx-ax)^2 + (by-ay)^2)
-			-- linha parte do centro do node A e vai ate o centro do node B
-			ef.Line.Position = UDim2.fromOffset(ax, ay)
-			ef.Line.Size     = UDim2.fromOffset(dist, 1)
-			ef.Line.Rotation = math.deg(math.atan2(by - ay, bx - ax))
+		local lineIdx = 0
+		for i = 1, NODE_COUNT do
+			local a  = nodes[i]
+			local fa = nodeFade(a)
+			local ax = a.Pos.X * sz.X
+			local ay = a.Pos.Y * sz.Y
+			for j = i + 1, NODE_COUNT do
+				local b  = nodes[j]
+				local fb = nodeFade(b)
+				local bx = b.Pos.X * sz.X
+				local by = b.Pos.Y * sz.Y
+				local dx, dy = bx - ax, by - ay
+				local dist = math.sqrt(dx * dx + dy * dy)
+				if dist <= maxDistPx and dist > 0.5 then
+					lineIdx = lineIdx + 1
+					local line = getLine(lineIdx)
+					local closeAlpha = 1 - dist / maxDistPx
+					local alpha = closeAlpha * math.min(fa, fb)
+					if alpha > 0.02 then
+						local mx = (ax + bx) / 2
+						local my = (ay + by) / 2
+						line.Position = UDim2.fromOffset(mx, my)
+						line.Size     = UDim2.fromOffset(dist, 1)
+						line.Rotation = math.deg(math.atan2(dy, dx))
+						line.BackgroundTransparency = 1 - alpha * 0.55
+						line.Visible = true
+					else
+						line.Visible = false
+					end
+				end
+			end
+		end
+		for i = lineIdx + 1, #lines do
+			lines[i].Visible = false
 		end
 	end)
 
