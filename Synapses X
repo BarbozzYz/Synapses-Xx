@@ -2310,5 +2310,514 @@ function Lib:CreateWindow(opts)
 
 	return win
 end
+-- ====================================================================
+-- CONFIGS + ABA SETTINGS  (cole este bloco INTEIRO logo ANTES do `return Lib` no final do SynLib.lua)
+--
+--  * Sempre cria a tab "Settings" (por ultimo na sidebar) > sub-tab "Configs"
+--      card "Save configs": nome da config, Save config, Overwrite config
+--      card "Load configs": dropdown com as configs do UserId, Load config, Autoload config
+--  * Salva TUDO que o usuario mexeu: checkbox (+ tecla e modo), slider, dropdown (single/multi),
+--    colorpicker, keybind, textbox, cards abertos/fechados, tabs abertas/fechadas e a sub-tab ativa
+--  * Pasta por UserId:  SynLib/<UserId>/configs/<nome>.json   e   SynLib/<UserId>/autoload.txt
+--  * Autoload: a config escolhida carrega SEMPRE que a UI e criada
+--
+--  Opcoes por elemento:  NoSave = true (nao entra na config)  |  Flag = "id_fixo"
+--  Opcao da janela:      CreateWindow({ Settings = false }) desliga a aba
+-- ====================================================================
+do
+	local HttpService = game:GetService("HttpService")
 
+	-- ---------------- arquivos (writefile/readfile; sem isso vale so na sessao) ----------------
+	local hasFS = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+		and type(isfolder) == "function" and type(makefolder) == "function" and type(listfiles) == "function"
+	local mem = {}
+
+	local function fsMake(p)
+		if hasFS and not isfolder(p) then
+			pcall(makefolder, p)
+		end
+	end
+	local function fsWrite(p, d)
+		if hasFS then
+			pcall(writefile, p, d)
+		else
+			mem[p] = d
+		end
+	end
+	local function fsRead(p)
+		if hasFS then
+			if isfile(p) then
+				local ok, d = pcall(readfile, p)
+				return ok and d or nil
+			end
+			return nil
+		end
+		return mem[p]
+	end
+	local function fsList(dir)
+		local out = {}
+		if hasFS then
+			if isfolder(dir) then
+				local ok, files = pcall(listfiles, dir)
+				if ok then
+					for _, f in ipairs(files) do
+						local n = tostring(f):match("([^/\\]+)%.json$")
+						if n then
+							out[#out + 1] = n
+						end
+					end
+				end
+			end
+		else
+			for p in pairs(mem) do
+				if p:sub(1, #dir + 1) == dir .. "/" then
+					local n = p:sub(#dir + 2):match("^(.+)%.json$")
+					if n then
+						out[#out + 1] = n
+					end
+				end
+			end
+		end
+		table.sort(out)
+		return out
+	end
+
+	local function root()
+		return "SynLib/" .. tostring(LocalPlayer.UserId)
+	end
+	local function cfgPath(name)
+		return root() .. "/configs/" .. name .. ".json"
+	end
+	local function ensureDirs()
+		fsMake("SynLib")
+		fsMake(root())
+		fsMake(root() .. "/configs")
+	end
+	local function clean(name)
+		name = tostring(name or ""):gsub("[^%w%s_%-]", "")
+		name = name:match("^%s*(.-)%s*$")
+		return name ~= "" and name or nil
+	end
+	local function readJSON(path)
+		local raw = fsRead(path)
+		if not raw then
+			return nil
+		end
+		local ok, d = pcall(function()
+			return HttpService:JSONDecode(raw)
+		end)
+		return (ok and type(d) == "table") and d or nil
+	end
+	local function readAutoloadName()
+		local n = fsRead(root() .. "/autoload.txt")
+		return n and clean(n) or nil
+	end
+
+	-- ---------------- leitura / escrita do valor de cada tipo de elemento ----------------
+	local function keyFrom(name)
+		if not name then
+			return nil
+		end
+		local ok, k = pcall(function()
+			return Enum.KeyCode[name]
+		end)
+		return ok and k or nil
+	end
+
+	local GET = {
+		checkbox = function(el)
+			return { v = el:Get(), key = el.Key and el.Key.Name or false, mode = el.Mode }
+		end,
+		slider = function(el)
+			return el:Get()
+		end,
+		dropdown = function(el)
+			return el:Get()
+		end,
+		color = function(el)
+			return string.upper(el:Get():ToHex())
+		end,
+		keybind = function(el)
+			local k = el:Get()
+			return k and k.Name or false
+		end,
+		textbox = function(el)
+			return el:Get()
+		end,
+	}
+
+	local SET = {
+		checkbox = function(el, d)
+			if type(d) == "table" then
+				if d.mode == "Toggle" or d.mode == "Hold" then
+					el.Mode = d.mode
+					if el._modeBtn then
+						el._modeBtn.Text = d.mode
+					end
+				end
+				if el.SetKey then
+					el:SetKey(keyFrom(d.key))
+				end
+				el:Set(d.v)
+			else
+				el:Set(d)
+			end
+		end,
+		slider = function(el, d)
+			if tonumber(d) then
+				el:Set(tonumber(d))
+			end
+		end,
+		dropdown = function(el, d)
+			if el.Multi then
+				local t = {}
+				for _, x in ipairs(type(d) == "table" and d or {}) do
+					if table.find(el.Options, x) then
+						t[#t + 1] = x
+					end
+				end
+				el:Set(t)
+			elseif table.find(el.Options, d) then
+				el:Set(d)
+			end
+		end,
+		color = function(el, d)
+			local ok, c = pcall(Color3.fromHex, tostring(d))
+			if ok and c then
+				el:Set(c)
+			end
+		end,
+		keybind = function(el, d)
+			el:Set(keyFrom(d))
+		end,
+		textbox = function(el, d)
+			el:Set(tostring(d))
+		end,
+	}
+
+	-- ---------------- registro de "flags" (cada elemento vira uma entrada da config) ----------------
+	function Window:_flag(id, get, set)
+		local n = (self._flagN[id] or 0) + 1
+		self._flagN[id] = n
+		if n > 1 then
+			id = id .. "#" .. n
+		end
+		self._flags[id] = { get = get, set = set }
+		-- se existe config de autoload, aplica o valor assim que o elemento nasce
+		local d = self._cfg and self._cfg.Elements and self._cfg.Elements[id]
+		if d ~= nil then
+			task.defer(function()
+				pcall(set, d, true)
+			end)
+		end
+		return id
+	end
+
+	local function wrapElement(method, kind)
+		local orig = Card[method]
+		Card[method] = function(self, o)
+			o = o or {}
+			local ov = self.Win.Overlay
+			local before = #ov:GetChildren()
+			local el = orig(self, o)
+			if o.NoSave or not self.Win._flags then
+				return el
+			end
+			-- acha o botao de modo (Toggle/Hold) da janelinha de keybind do checkbox
+			if kind == "checkbox" and o.Keybind ~= false then
+				local kids = ov:GetChildren()
+				if #kids > before then
+					for _, d in ipairs(kids[#kids]:GetDescendants()) do
+						if d:IsA("TextButton") and (d.Text == "Toggle" or d.Text == "Hold") then
+							el._modeBtn = d
+						end
+					end
+				end
+			end
+			local sub = self.Sub
+			local id = o.Flag or table.concat({ sub.Tab.Name, sub.Name, self.Title, o.Name or kind }, "/")
+			el.Flag = self.Win:_flag(id, function()
+				return GET[kind](el)
+			end, function(v)
+				SET[kind](el, v)
+			end)
+			return el
+		end
+	end
+	wrapElement("AddCheckbox", "checkbox")
+	wrapElement("AddSlider", "slider")
+	wrapElement("AddDropdown", "dropdown")
+	wrapElement("AddColorPicker", "color")
+	wrapElement("AddKeybind", "keybind")
+	wrapElement("AddTextBox", "textbox")
+
+	-- cards abertos/fechados
+	local origAddCard = SubTab.AddCard
+	function SubTab:AddCard(o)
+		o = o or {}
+		local card = origAddCard(self, o)
+		local win = self.Win
+		if not o.NoSave and win._flags then
+			local id = "card:" .. table.concat({ self.Tab.Name, self.Name, card.Title }, "/")
+			win:_flag(id, function()
+				return card.Open
+			end, function(v, instant)
+				card:SetOpen(v, instant)
+			end)
+		end
+		return card
+	end
+
+	-- tabs abertas/fechadas
+	local origAddTab = Window.AddTab
+	function Window:AddTab(o)
+		if type(o) == "string" then
+			o = { Name = o }
+		end
+		local tab = origAddTab(self, o)
+		if not o.NoSave and self._flags then
+			self:_flag("tab:" .. tab.Name, function()
+				return tab.Open
+			end, function(v, instant)
+				tab:SetOpen(v, instant)
+			end)
+		end
+		return tab
+	end
+
+	-- lembra a ultima sub-tab (fora de Settings) para salvar/abrir nela
+	local origSelectSub = Window._selectSub
+	function Window:_selectSub(sub, instant)
+		if sub.Tab.Name ~= "Settings" then
+			self._lastSub = sub
+		end
+		return origSelectSub(self, sub, instant)
+	end
+
+	function Window:_selectByPath(path, instant)
+		for _, t in ipairs(self.Tabs) do
+			for _, s in ipairs(t.SubTabs) do
+				if (t.Name .. "/" .. s.Name) == path then
+					s:Select(instant)
+					return
+				end
+			end
+		end
+	end
+
+	-- ---------------- API de configs ----------------
+	function Window:ListConfigs()
+		return fsList(root() .. "/configs")
+	end
+
+	function Window:GetAutoload()
+		return readAutoloadName()
+	end
+
+	function Window:SaveConfig(name, overwrite)
+		name = clean(name)
+		if not name then
+			return false, "Invalid name"
+		end
+		if not overwrite and fsRead(cfgPath(name)) then
+			return false, "Already exists (use Overwrite)"
+		end
+		ensureDirs()
+		local els = {}
+		for id, e in pairs(self._flags) do
+			local ok, v = pcall(e.get)
+			if ok and v ~= nil then
+				els[id] = v
+			end
+		end
+		local sub = self._lastSub
+		local data = {
+			Version = 1,
+			Elements = els,
+			Active = sub and (sub.Tab.Name .. "/" .. sub.Name) or nil,
+		}
+		local ok, json = pcall(function()
+			return HttpService:JSONEncode(data)
+		end)
+		if not ok then
+			return false, "Could not encode config"
+		end
+		fsWrite(cfgPath(name), json)
+		return true, name
+	end
+
+	function Window:_applyData(data, instant, applyActive)
+		for id, v in pairs(data.Elements or {}) do
+			local e = self._flags[id]
+			if e then
+				pcall(e.set, v, instant)
+			end
+		end
+		if applyActive and data.Active then
+			self:_selectByPath(data.Active, true)
+		end
+	end
+
+	function Window:LoadConfig(name)
+		name = clean(name)
+		if not name then
+			return false, "Invalid name"
+		end
+		local data = readJSON(cfgPath(name))
+		if not data then
+			return false, "Config not found"
+		end
+		self:_applyData(data, false, false)
+		return true, name
+	end
+
+	function Window:SetAutoload(name)
+		name = clean(name)
+		if not name or not fsRead(cfgPath(name)) then
+			return false, "Config not found"
+		end
+		ensureDirs()
+		fsWrite(root() .. "/autoload.txt", name)
+		return true, name
+	end
+
+	-- ---------------- aba Settings > Configs ----------------
+	function Window:_buildSettings()
+		local tab = self:AddTab({ Name = "Settings", Icon = "settings", NoSave = true })
+		tab._holder.LayoutOrder = 1000000 -- sempre por ultimo na sidebar
+		local sub = tab:AddSubTab({ Name = "Configs", Icon = "folder" })
+
+		local saveCard = sub:AddCard({ Title = "Save configs", Side = "Left", NoSave = true })
+		local loadCard = sub:AddCard({ Title = "Load configs", Side = "Right", NoSave = true })
+
+		local function flash(row, text)
+			local l = row:FindFirstChildOfClass("TextLabel")
+			if l then
+				l.Text = text
+				l.TextColor3 = T.Text
+				tween(l, 3, { TextColor3 = T.Dim }, Enum.EasingStyle.Linear)
+			end
+		end
+
+		-- Save configs
+		local nameBox = saveCard:AddTextBox({ Name = "Config name", Placeholder = "Enter name...", NoSave = true })
+		local saveStatus
+		local list, autoRow
+
+		local function refresh(select)
+			local names = self:ListConfigs()
+			if #names == 0 then
+				names = { "--" }
+			end
+			list:Refresh(names)
+			local pick = (select and table.find(names, select)) and select or names[1]
+			list:Set(pick, true)
+		end
+		local function selected()
+			local v = list:Get()
+			return (v ~= nil and v ~= "--") and v or nil
+		end
+
+		saveCard:AddButton({
+			Name = "Save config",
+			Icon = "save",
+			Callback = function()
+				local ok, res = self:SaveConfig(nameBox:Get(), false)
+				if ok then
+					refresh(res)
+					flash(saveStatus, "Saved: " .. res)
+				else
+					flash(saveStatus, res)
+				end
+			end,
+		})
+		saveCard:AddButton({
+			Name = "Overwrite config",
+			Icon = "refresh-cw",
+			Callback = function()
+				local typed = clean(nameBox:Get())
+				local target = (typed and fsRead(cfgPath(typed))) and typed or selected()
+				if not target then
+					return flash(saveStatus, "Type an existing name or pick one in Load configs")
+				end
+				local ok, res = self:SaveConfig(target, true)
+				if ok then
+					refresh(res)
+					flash(saveStatus, "Overwritten: " .. res)
+				else
+					flash(saveStatus, res)
+				end
+			end,
+		})
+		saveStatus = saveCard:AddLabel("Ready")
+
+		-- Load configs
+		list = loadCard:AddDropdown({ Name = "Config list", Options = { "--" }, Default = "--", NoSave = true })
+		local loadStatus
+		loadCard:AddButton({
+			Name = "Load config",
+			Icon = "download",
+			Callback = function()
+				local n = selected()
+				if not n then
+					return flash(loadStatus, "Select a config first")
+				end
+				local ok, res = self:LoadConfig(n)
+				flash(loadStatus, ok and ("Loaded: " .. res) or res)
+			end,
+		})
+		loadCard:AddButton({
+			Name = "Autoload config",
+			Icon = "zap",
+			Callback = function()
+				local n = selected()
+				if not n then
+					return flash(loadStatus, "Select a config first")
+				end
+				local ok, res = self:SetAutoload(n)
+				if ok then
+					flash(autoRow, "Autoload: " .. res)
+					flash(loadStatus, "Autoload set")
+				else
+					flash(loadStatus, res)
+				end
+			end,
+		})
+		autoRow = loadCard:AddLabel("Autoload: none")
+		loadStatus = loadCard:AddLabel("Ready")
+
+		local auto = self:GetAutoload()
+		local autoLabel = autoRow:FindFirstChildOfClass("TextLabel")
+		if autoLabel then
+			autoLabel.Text = "Autoload: " .. (auto or "none")
+		end
+		refresh(auto)
+	end
+
+	-- ---------------- CreateWindow: registra flags, le o autoload e cria a aba Settings ----------------
+	local origCreate = Lib.CreateWindow
+	function Lib:CreateWindow(opts)
+		opts = opts or {}
+		local auto = readAutoloadName()
+		local data = auto and readJSON(cfgPath(auto)) or nil
+		local win = origCreate(self, opts)
+		win._flags, win._flagN, win._cfg = {}, {}, data
+
+		-- roda depois que o script do usuario terminou de montar a UI
+		task.defer(function()
+			if opts.Settings ~= false then
+				local ok, err = pcall(function()
+					win:_buildSettings()
+				end)
+				if not ok then
+					warn("[SynLib] Settings: " .. tostring(err))
+				end
+			end
+			if data and data.Active then
+				win:_selectByPath(data.Active, true)
+			end
+		end)
+		return win
+	end
+end
 return Lib
